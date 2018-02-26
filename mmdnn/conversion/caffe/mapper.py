@@ -35,15 +35,36 @@ class NodeMapper(object):
     @classmethod
     def get_kernel_params(cls, node, input_shape):
         kwargs = {}
-        
-        o_h_caffe = node.output_shape.height
-        o_h_tf = (input_shape.height + node.kernel_parameters.p_h * 2 - node.kernel_parameters.k_h + 1) // node.kernel_parameters.s_h
-        
-        o_w_caffe = node.output_shape.width
-        o_w_tf = (input_shape.width + node.kernel_parameters.p_w * 2 - node.kernel_parameters.k_w + 1) // node.kernel_parameters.s_w
-                
-        kwargs['pads'] = [0, node.kernel_parameters.p_h, node.kernel_parameters.p_w, 0] + \
-                  [0, node.kernel_parameters.p_h + o_h_caffe - o_h_tf, node.kernel_parameters.p_w + o_w_caffe - o_w_tf, 0]
+
+        if node.kernel_parameters.global_pooling:
+            kwargs['kernel_shape'] = [1, input_shape.height, input_shape.width, 1]
+            kwargs['pads'] = [0] * 8
+
+        else:
+            from mmdnn.conversion.caffe.graph import NodeKind
+            if node.kind == NodeKind.Pooling:
+                kwargs['kernel_shape'] = [1, node.kernel_parameters.k_h, node.kernel_parameters.k_w, 1]
+            elif node.kind in [NodeKind.Convolution, NodeKind.Deconvolution]:
+                pass
+            else:
+                raise ValueError
+
+            dilation = node.parameters.dilation[0] if hasattr(node.parameters, 'dilation') and node.parameters.dilation else 1
+            o_h_caffe = node.output_shape.height
+            o_w_caffe = node.output_shape.width
+            ko_h = dilation * (int(node.kernel_parameters.k_h) - 1) + 1
+            ko_w = dilation * (int(node.kernel_parameters.k_w) - 1) + 1
+
+            if node.kind == NodeKind.Deconvolution:
+                o_h_tf = int(node.kernel_parameters.s_h) * (input_shape.height - 1) + ko_h - 2 * int(node.kernel_parameters.p_h)
+                o_w_tf = int(node.kernel_parameters.s_w) * (input_shape.width - 1) + ko_w - 2 * int(node.kernel_parameters.p_w)
+            else:
+                o_h_tf = (input_shape.height + node.kernel_parameters.p_h * 2 - ko_h + 1) // node.kernel_parameters.s_h
+                o_w_tf = (input_shape.width + node.kernel_parameters.p_w * 2 - ko_w + 1) // node.kernel_parameters.s_w
+
+            kwargs['pads'] = [0, node.kernel_parameters.p_h, node.kernel_parameters.p_w, 0] + \
+                    [0, node.kernel_parameters.p_h + o_h_caffe - o_h_tf, node.kernel_parameters.p_w + o_w_caffe - o_w_tf, 0]
+
         kwargs['strides'] = [1, node.kernel_parameters.s_h, node.kernel_parameters.s_w, 1]
         cls._convert_output_shape(kwargs, node)
 
@@ -76,20 +97,28 @@ class NodeMapper(object):
         parent, _ = node.get_only_parent()
         kwargs = cls.get_kernel_params(node, parent.output_shape)
         kwargs['kernel_shape'] = [node.kernel_parameters.k_h, node.kernel_parameters.k_w, parent.output_shape.channels, node.parameters.num_output]
-        kwargs['use_bias'] = node.parameters.bias_term        
+        kwargs['use_bias'] = node.parameters.bias_term
+        if node.parameters.dilation:
+            dilation = node.parameters.dilation[0]
+            if dilation != 1:
+                kwargs['dilations'] = [1, dilation, dilation, 1]
         kwargs['group'] = node.parameters.group
         return Node.create('Conv', **kwargs)
 
 
     @classmethod
     def map_deconvolution(cls, node):
-        raise NotImplementedError()
         parent, _ = node.get_only_parent()
         kwargs = cls.get_kernel_params(node, parent.output_shape)
-        
-        kwargs['kernel_shape'] = [node.kernel_parameters.k_h, node.kernel_parameters.k_w, parent.output_shape.channels, node.parameters.num_output]        
+
+        kwargs['kernel_shape'] = [node.kernel_parameters.k_h, node.kernel_parameters.k_w, node.parameters.num_output, parent.output_shape.channels]
+        kwargs['use_bias'] = node.parameters.bias_term
+        if node.parameters.dilation:
+            dilation = node.parameters.dilation[0]
+            if dilation != 1:
+                kwargs['dilations'] = [1, dilation, dilation, 1]
         kwargs['group'] = node.parameters.group
-        return Node.create('deconv', **kwargs)
+        return Node.create('ConvTranspose', **kwargs)
 
     @classmethod
     def map_crop(cls, node):
@@ -117,7 +146,6 @@ class NodeMapper(object):
         else:
             # Stochastic pooling, for instance.
             raise ConversionError('Unsupported pooling type.')
-        kwargs['kernel_shape'] = [1, node.kernel_parameters.k_h, node.kernel_parameters.k_w, 1]
         cls._convert_output_shape(kwargs, node)
         return Node.create('Pool', **kwargs)
 
@@ -145,7 +173,7 @@ class NodeMapper(object):
         # check if need the Flatten layer
         parent, _ = node.get_only_parent()
         ret = []
-                
+
         # if parent.output_shape.height > 1 or parent.output_shape.width > 1:
         ret.append(cls._add_flatten_layer(parent))
         ret.append(Node.create('FullyConnected', **kwargs))
@@ -153,7 +181,9 @@ class NodeMapper(object):
 
     @classmethod
     def map_softmax(cls, node):
-        return Node.create('Softmax')
+        kwargs = {}
+        cls._convert_output_shape(kwargs, node)
+        return Node.create('Softmax', **kwargs)
 
     @classmethod
     def map_lrn(cls, node):
@@ -177,11 +207,19 @@ class NodeMapper(object):
 
     @classmethod
     def map_batch_norm(cls, node):
-        scale_offset = len(node.data) == 4
-        kwargs = {} if scale_offset else {'scale' : False, 'bias' : False}
+        kwargs = {'scale' : len(node.data) >= 3, 'bias' : len(node.data) == 4}
         epsilon = node.parameters.eps
         kwargs['epsilon'] = epsilon
         cls._convert_output_shape(kwargs, node)
+        return Node.create('BatchNorm', **kwargs)
+
+    @classmethod
+    def map_scale(cls, node):
+        raise NotImplementedError
+        # TODO: The gamma parameter has to be set (in node.data?) and this should work.
+        # Also, mean should be set to 0, and var to 1, just to be safe.
+        scale_value = float(node.parameters.filler.value)
+        kwargs = {'scale' : True, 'bias' : False, 'gamma' : scale_value, 'epsilon': 0}
         return Node.create('BatchNorm', **kwargs)
 
     @classmethod
@@ -195,12 +233,22 @@ class NodeMapper(object):
 
     @classmethod
     def map_abs_val(cls, node):
-        return Node.create('abs_val')
+        return Node.create('Abs')
 
     @classmethod
     def map_tanh(cls, node):
-        return Node.create('tanh')
+        return Node.create('Tanh')
 
     @classmethod
     def map_sigmoid(cls, node):
-        return Node.create('sigmoid')
+        return Node.create('Sigmoid')
+
+    @classmethod
+    def map_reshape(cls, node):
+        kwargs = {'shape' : [dim for dim in node.output_shape]}
+        cls._convert_output_shape(kwargs, node)
+        return Node.create('Reshape', **kwargs)
+
+    @classmethod
+    def map_flatten(cls, node):
+        return Node.create('Flatten')

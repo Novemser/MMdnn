@@ -1,8 +1,9 @@
-var json;
+let json;
 const nodeW = 150, nodeH = 30;
 const filePath = "model.json";
 const miniW = window.innerWidth * 0.12
 const miniH = (window.innerHeight-85) * 0.98
+let rankBT = true
 
 
 /*hanle import model*/
@@ -12,6 +13,7 @@ const handleFileSelect = (evt) => {
     reader.onload = e => {
         // console.info(JSON.parse(e.target.result))
         draw(JSON.parse(e.target.result))
+        json = JSON.parse(e.target.result)
     }
     reader.readAsText(file)
 }
@@ -24,10 +26,15 @@ document.getElementById('importModel').addEventListener('change', handleFileSele
 //         draw(json)
 //     })
 // }
+function reverse(){
+    rankBT = !rankBT;
+    draw(json)
+}
+
 //generate dag
 getDag = (layers, mode, margin) => {
     let g = new dagre.graphlib.Graph();
-    g.setGraph({ranksep:20, marginx:margin, marginy:margin, rankdir:'BT'});
+    g.setGraph({ranksep:20, marginx:margin, marginy:margin, rankdir:rankBT?'BT':'TB'});
     g.setDefaultEdgeLabel(() => { return {}; });
     layers.forEach(layer => {
         label = mode == "IR" ? `${layer.name}|${layer.op}` : `${layer.name}:${layer.class_name}`
@@ -106,6 +113,7 @@ const selectLayer = (layer, info, mode) => {
 //draw
 const draw = (json) => {
     d3.select('.shiftMargin').remove() //remove previous graph
+    d3.select('.miniMap').remove() //remove previous graph
 
 
     let mode;
@@ -192,17 +200,15 @@ const draw = (json) => {
         .attr("transform", d => { return `translate( ${-d.width * 0.6},${-nodeH * 0.6})` })
         .style("fill", "transparent")
         .style("stroke", "none")
-        .on("click", function (d) {
-            console.info("click")
-            d3.event.stopPropagation()
+        .on("mousedown", function (d) {
             d3.event.preventDefault()
+            d3.event.stopPropagation()
             d3.selectAll('.nodeMask')
                 .style('stroke', "none")
 
             d3.select(this)
                 .style("stroke", "red")
                 .style("stroke-width", 5)
-
             selectLayer(d, info, mode)
         })
     
@@ -214,7 +220,6 @@ const draw = (json) => {
     svg.call(d3.zoom().on('zoom', pan))
     .on("wheel.zoom", scroll)
     .on("dblclick.zoom", null)
-    
     // svg.on('keydown', ()=>{console.info('ddd')})
     // .on('mouseover', ()=>{console.info('mouse over')})
     let shiftDown = false
@@ -224,25 +229,24 @@ const draw = (json) => {
    .on("keyup", ()=>{shiftDown=false})
     
     function pan(e) {
-        d3.event.stopPropagation()
-        d3.event.preventDefault()
-        console.info('pan')
-        let { k:k_, x:x_, y:y_ } = d3.zoomTransform(this)
+        let { movementX:x_, movementY:y_ } = d3.event.sourceEvent
         let { k, x, y } = transformParser(d3.select('.scene').attr('transform'))
-        k = parseFloat(k)*parseFloat(k_)
-        x = x_
-        y = y_
+        
+        // k = parseFloat(k)*parseFloat(k_)
+        x = parseFloat(x_) + parseFloat(x)
+        y = parseFloat(y_) + parseFloat(y)
         // limit x, y
         x = Math.max(-width*k*0.3, Math.min(x, width*k*0.7))
         y= Math.min(0.4 * window.innerHeight, Math.max(-height*k + 0.4 * window.innerHeight, y))
         g.attr('transform', `translate(${x}, ${y}) scale(${k})`);
+
         d3.select(".mapMask")
             .attr("y", (-y) / k *miniScale)
             .attr("height", miniH*miniScale / k)
 
-        // a trick to make text svg transform in MS Edge
-        d3.selectAll(".labels").classed("tempclass", true);
-        setTimeout(function () { d3.selectAll(".labels").classed("tempclass", false); }, 40);
+        // // a trick to make text svg transform in MS Edge
+        // d3.selectAll(".labels").classed("tempclass", true);
+        // setTimeout(function () { d3.selectAll(".labels").classed("tempclass", false); }, 40);
     }
     function scroll(e){
         let { k, x, y } = transformParser(d3.select('.scene').attr('transform'))

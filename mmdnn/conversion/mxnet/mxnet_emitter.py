@@ -12,6 +12,7 @@ from mmdnn.conversion.common.IR.IR_graph import IRGraph, IRGraphNode
 import mmdnn.conversion.common.IR.graph_pb2 as graph_pb2
 from mmdnn.conversion.common.IR.graph_pb2 import NodeDef, GraphDef, DataType
 from mmdnn.conversion.common.DataStructure.emitter import Emitter
+from mmdnn.conversion.common.utils import *
 
 class MXNetEmitter(Emitter):
 
@@ -24,6 +25,7 @@ class MXNetEmitter(Emitter):
     }
 
     activation_map = {
+        "relu6"   : "Relu",
         "relu"    : "Relu",
         "sigmoid" : "Sigmoid",
         "tanh"    : "Tanh",
@@ -35,21 +37,20 @@ class MXNetEmitter(Emitter):
         2 : 3,
        -1 : 1
     }
-    
+
     channels_last = ['NDHWC', 'NHWC']
 
     def __init__(self, model):
         super(MXNetEmitter, self).__init__()
         from six import string_types as _string_types
-        
+
         if isinstance(model, _string_types):
             network_path = model
             self.weight_loaded = False
-        elif len(model) == 4:
+        elif len(model) == 3:
             network_path = model[0]
             weight_path = model[1]
-            self.input_shape = model[2]
-            self.output_weights_file = model[3]
+            self.output_weights_file = model[2]
             self.weights = np.load(weight_path).item()
             self.weight_loaded = True
             self.output_weights = dict()
@@ -64,6 +65,7 @@ class MXNetEmitter(Emitter):
     def header_code(self):
         return """import mxnet as mx
 import numpy as np
+import math
 
 # mxnet-cpu only support channel first, default convert the model and weight as channel first
 
@@ -87,7 +89,7 @@ def RefactorModel():
 
             if node_type.lower() in MXNetEmitter.activation_map:
                 func = getattr(self, "emit_Activation")
-                line = func(current_node, node_type.lower())
+                line = func(current_node, MXNetEmitter.activation_map[node_type.lower()].lower())
                 self.add_body(1, line)
             elif hasattr(self, "emit_" + node_type):
                 func = getattr(self, "emit_" + node_type)
@@ -115,9 +117,10 @@ def RefactorModel():
 
 
         if self.weight_loaded:
-            dirname = os.path.dirname(self.output_weights_file)
+            fullpath = os.path.abspath(self.output_weights_file)
+            dirname = os.path.dirname(fullpath)
             if not os.path.exists(dirname):
-                os.makedirs(self.output_weights_file)
+                os.makedirs(dirname)
             with open(self.output_weights_file, 'wb') as outfile:
                 np.save(outfile, self.output_weights)
 
@@ -195,23 +198,20 @@ def predict(model, labels, url):
     # # call function predict
     # with open('synset.txt', 'r') as f:
     #     labels = [l.rstrip() for l in f]
-    # predict(model, labels, 'http://writm.com/wp-content/uploads/2016/08/Cat-hd-wallpapers.jpg')    
+    # predict(model, labels, 'http://writm.com/wp-content/uploads/2016/08/Cat-hd-wallpapers.jpg')
 """
 
             code = self.body_code + weight_code + test_code + main_code
 
         return code
-    
+
 
     def gen_weight_code(self, shape, phase):
-        if len(shape) == 0:
-            # var = raw_input("Input layer not detected, please type data shape manually(i.e. X, X, X, X): ")
-            shape['data'] = ', '.join('%s' % i for i in self.input_shape)
         str = "def deploy_weight(model, weight_file):\n"
         str += """
     if weight_file == None:
         return
-    
+
     try:
         weights_dict = np.load(weight_file).item()
     except:
@@ -232,7 +232,7 @@ def predict(model, labels, url):
         else:
             str += "    model.bind(for_training = False, data_shapes = ["
         first = True
-        for k, v in shape.items():          
+        for k, v in shape.items():
             if not first:
                 str += ", "
             str += "('" + k + "', " + "(" + v + "))"
@@ -244,14 +244,6 @@ def predict(model, labels, url):
 
     @staticmethod
     def calculate_same_pad(data_shape, kernel, stride):
-        # same_pad = int(math.ceil(float(data_shape) / float(stride)))
-        # valid_pad = int(math.ceil(float(data_shape - kernel + 1) / float(stride)))
-        # # if (same_pad - valid_pad) % 2 == 0:
-        # #     return True, (same_pad - valid_pad)
-        # # else:
-        # #     return False, (same_pad - valid_pad)
-        # return (same_pad - valid_pad)
-        # # raise NotImplementedError
         if (data_shape % stride == 0):
             pad = max(kernel - stride, 0)
         else:
@@ -260,35 +252,33 @@ def predict(model, labels, url):
             return False, pad
         else:
             return True, pad
-        # raise NotImplementedError
 
-    
+
     @staticmethod
-    def transfer_pad(mode, data_shape, kernel, stride):
-        if len(stride) == 0:
-            stride = list([1] * len(kernel))
-        if mode == b'SAME':
-            # print(data_shape, kernel, stride)
-            defuse_pad = False
-            ret = list()
-            for i in range(len(kernel)):
-                defuse_pad, same_pad = MXNetEmitter.calculate_same_pad(data_shape[i+1], kernel[i], stride[i])
-                ret.append(same_pad)
-            if defuse_pad:
-                tmp = list([0, 0, 0, 0])
-                for e in ret:
-                    tmp.extend([int(e / 2), int(e / 2 + 1)])
-                ret = tmp
-            else:
-                ret = [int(e / 2) for e in ret]
-            return defuse_pad, ret
-        elif mode == b'VALID':
-            return False, list([0]* len(kernel))
-        else:
-            raise ValueError("Padding algorithm [{}] is not supported" % mode)
-    
+    def transfer_pad(pad_list):
+        defuse_pad = False
+        pad = list()
 
-    @staticmethod   
+        assert len(pad_list) % 2 == 0
+        mid = int(len(pad_list)/2)
+        pad_first = pad_list[1:mid-1]
+        pad_second = pad_list[mid+1:-1]
+
+        for i in range(0, mid-2):
+            if not pad_first[i] == pad_second[i]:
+                defuse_pad = True
+
+        if defuse_pad:
+            pad.extend([0] * 4)
+            for i in range(0, mid-2):
+                pad.extend([pad_first[i], pad_second[i]])
+        else:
+            pad = pad_first
+
+        return defuse_pad, pad
+
+
+    @staticmethod
     def transpose(data, dim):
         if dim == 1:
             data = data.transpose((2, 1, 0))
@@ -302,35 +292,51 @@ def predict(model, labels, url):
         return data
 
 
-    def set_pad(self, IR_node, code, pad):
-        code = "{:<15} = mx.sym.pad(data = {}, mode = 'constant', pad_width = ({}), constant_value = 0, name = '{}')".format(
-                IR_node.variable_name + "_pad",                
-                self.parent_variable_name(IR_node),                
-                pad,
-                IR_node.name + "_pad")                    
+    def set_pad(self, IR_node, code, pad, _max_pool):
+        if _max_pool:
+            constant_value = "-math.inf"
+        else:
+            constant_value = "0.0"
+
+        code = "{:<15} = mx.sym.pad(data = {}, mode = 'constant', pad_width={}, constant_value = {}, name = '{}')".format(
+                IR_node.variable_name + "_pad",
+                self.parent_variable_name(IR_node),
+                tuple(pad),
+                constant_value,
+                IR_node.name + "_pad")
 
         for e in IR_node.in_edges:
             if e == 'data':
                 continue
             self.IR_layer_map[e].out_edges = [x if not self.IR_layer_map[x].name == IR_node.variable_name else IR_node.variable_name + "_pad" for x in self.IR_layer_map[e].out_edges]
 
-        return code     
-        
-        
+        return code
+
+
     def emit_UNKNOWN(self, IR_node):
-        print(IR_node.IR_layer.name)
+        print(IR_node.name)
 
 
     def emit_FullyConnected(self, IR_node):
         if self.weight_loaded:
             weight_dict = self.weights[IR_node.name]
+            parent = self.IR_graph.get_parent(IR_node.name, [0])
+            while parent.type == "Flatten":
+                parent = self.IR_graph.get_parent(parent.name, [0])
+            dim = len(parent.layer.attr['_output_shapes'].list.shape[0].dim)
+            if dim > 2:
+                original_dims = weight_dict['weights'].shape
+                dims = [i.size for i in parent.layer.attr['_output_shapes'].list.shape[0].dim[1:]] + [-1]
+                weight_dict['weights'] = np.reshape(weight_dict['weights'], dims)
+                weight_dict['weights'] = np.transpose(weight_dict['weights'], [dim - 2] + list(range(0, dim - 2)) + [dim - 1])
+                weight_dict['weights'] = np.reshape(weight_dict['weights'], original_dims)
             self.output_weights[IR_node.name + "_weight"] = weight_dict['weights'].transpose((1, 0))
-        
+
         num_hidden = IR_node.IR_layer.attr["units"].i
         no_bias = not IR_node.IR_layer.attr["use_bias"].b
         if not no_bias and self.weight_loaded:
             self.output_weights[IR_node.name + "_bias"] = weight_dict['bias']
-        
+
         code = "{:<15} = mx.sym.FullyConnected(data = {}, num_hidden = {}, no_bias = {}, name = '{}')".format(
                 IR_node.variable_name,
                 self.parent_variable_name(IR_node),
@@ -341,54 +347,63 @@ def predict(model, labels, url):
         return code
 
 
-    def emit_Convolution(self, IR_node):
+    def _emit_convolution(self, IR_node, pattern):
         if self.weight_loaded:
             weight_dict = self.weights[IR_node.name]
-            weights = weight_dict['weights']        
-    
-        dim = len(IR_node.IR_layer.attr["filter"].list.i) - 2
+            weights = weight_dict['weights']
+
+        dim = len(IR_node.IR_layer.attr["kernel_shape"].list.i) - 2
 
         kernel = list()
         for idx in range(0, dim):
-            kernel.append(IR_node.IR_layer.attr["filter"].list.i[idx])
-        
+            kernel.append(IR_node.IR_layer.attr["kernel_shape"].list.i[idx])
+
         stride = list()
         for e in IR_node.IR_layer.attr["strides"].list.i[1:-1]:
             stride.append(e)
 
         dilate = list()
-        for e in IR_node.IR_layer.attr["dilation_rate"].list.i[1:-1]:
+        for e in IR_node.IR_layer.attr["dilations"].list.i[1:-1]:
             dilate.append(e)
         dilate = ', '.join('%s' % i for i in dilate)
 
         defuse_pad = False
         pad = list()
-        if "padding" in IR_node.IR_layer.attr:    
-            output_shape = list()            
+        if "pads" in IR_node.IR_layer.attr:
+            output_shape = list()
             for e in IR_node.IR_layer.attr["_output_shapes"].list.shape[0].dim:
                 output_shape.append(e.size)
 
             # print("Warning: MXNet Convolution Layer pad does not match IR Convolution Layer pad")
-            defuse_pad, pad = MXNetEmitter.transfer_pad(IR_node.IR_layer.attr["padding"].s, output_shape, kernel, stride)
-        pad = ', '.join('%s' % i for i in pad)
+            defuse_pad, pad = MXNetEmitter.transfer_pad(IR_node.IR_layer.attr["pads"].list.i)
 
-        kernel = ', '.join('%s' % i for i in kernel)        
-        stride = ', '.join('%s' % i for i in stride)
-        
-        num_filter = IR_node.IR_layer.attr["filter"].list.i[-1]
-        no_bias = not IR_node.IR_layer.attr["use_bias"].b
-        if not no_bias and self.weight_loaded:
-            self.output_weights[IR_node.name + "_bias"] = weight_dict['bias']    
-        
-        layout = IR_node.IR_layer.attr["data_format"].s
-        # if layout == '':
-        #     if dim == 1:
-        #         layout = 'NCW'
-        #     elif dim == 2:
-        #         layout = 'NHWC'
-        #     elif dim == 3:
-        #         layout = 'NDHWC'
-        layout = 'NCHW'
+        num_filter = 0
+        if pattern == "Deconvolution":
+            num_filter = IR_node.IR_layer.attr["kernel_shape"].list.i[-2]
+        else:
+            num_filter = IR_node.IR_layer.attr["kernel_shape"].list.i[-1]
+
+        use_bias = IR_node.get_attr('use_bias', False)
+        if use_bias and self.weight_loaded:
+            self.output_weights[IR_node.name + "_bias"] = weight_dict['bias']
+
+        if pattern == "DepthwiseConv":
+            num_group = IR_node.IR_layer.attr["kernel_shape"].list.i[-2]
+            num_filter = num_filter * num_group
+            pattern = "Convolution"
+            if self.weight_loaded:
+                weights = np.swapaxes(weights, -1, -2)
+
+        else:
+            num_group = IR_node.get_attr('group', 1)
+
+        # layout = IR_node.IR_layer.attr["data_format"].s
+        if dim == 1:
+            layout = 'NCW'
+        elif dim == 2:
+            layout = 'NCHW'
+        elif dim == 3:
+            layout = 'NCDHW'
 
         if self.weight_loaded:
             # if layout not in MXNetEmitter.channels_last:
@@ -397,35 +412,47 @@ def predict(model, labels, url):
 
         code = ""
         if not defuse_pad:
-            # code = "{:<15} = mx.sym.transpose(data = {}, axes = (0, 3, 1, 2))\n".format(IR_node.replace_scope(IR_node.name) + "_input", IR_node.replace_scope(IR_node.in_edges[0]))
-            code += "{:<15} = mx.sym.Convolution(data = {}, kernel = ({}), stride = ({}), dilate = ({}), pad = ({}), num_filter = {}, no_bias = {}, layout = '{}', name = '{}')".format(
+            code += "{:<15} = mx.sym.{}(data={}, kernel={}, stride={}, dilate = ({}), pad={}, num_filter = {}, num_group = {}, no_bias = {}, layout = '{}', name = '{}')".format(
                 IR_node.variable_name,
+                pattern,
                 self.parent_variable_name(IR_node),
-                kernel,
-                stride,
+                tuple(kernel),
+                tuple(stride),
                 dilate,
-                pad,
+                tuple(pad),
                 num_filter,
-                no_bias,
+                num_group,
+                not use_bias,
                 layout,
                 IR_node.name)
-            # code += "    {:<15} = mx.sym.transpose(data = {}, axes = (0, 2, 3, 1))\n".format(IR_node.replace_scope(IR_node.name), IR_node.replace_scope(IR_node.name))
         else:
-            # code = "{:<15} = mx.sym.transpose(data = {}, axes = (0, 3, 1, 2))\n".format(IR_node.replace_scope(IR_node.name) + "_input", IR_node.replace_scope(IR_node.in_edges[0]))
-            code += self.set_pad(IR_node, code, pad)
-            code += "\n    {:<15} = mx.sym.Convolution(data = {}, kernel = ({}), stride = ({}), dilate = ({}), num_filter = {}, no_bias = {}, layout = '{}', name = '{}')".format(
+            code += self.set_pad(IR_node, code, pad, False)
+            code += "\n    {:<15} = mx.sym.{}(data={}, kernel={}, stride={}, dilate = ({}), num_filter = {}, num_group = {}, no_bias = {}, layout = '{}', name = '{}')".format(
                 IR_node.variable_name,
+                pattern,
                 IR_node.variable_name + "_pad",
-                kernel,
-                stride,
+                tuple(kernel),
+                tuple(stride),
                 dilate,
                 num_filter,
-                no_bias,
+                num_group,
+                not use_bias,
                 layout,
                 IR_node.name)
-            # code += "    {:<15} = mx.sym.transpose(data = {}, axes = (0, 2, 3, 1))\n".format(IR_node.replace_scope(IR_node.name), IR_node.replace_scope(IR_node.name))
-            
-        return code        
+
+        return code
+
+
+    def emit_Conv(self, IR_node):
+        return self._emit_convolution(IR_node, "Convolution")
+
+
+    def emit_DepthwiseConv(self, IR_node):
+        return self._emit_convolution(IR_node, "DepthwiseConv")
+
+
+    def emit_ConvTranspose(self, IR_node):
+        return self._emit_convolution(IR_node, "Deconvolution")
 
 
     def emit_DataInput(self, IR_node):
@@ -450,7 +477,7 @@ def predict(model, labels, url):
         code = "{:<15} = mx.sym.{}(data = {}, act_type = '{}', name = '{}')".format(
                 IR_node.variable_name,
                 func_name,
-                self.parent_variable_name(IR_node),                
+                self.parent_variable_name(IR_node),
                 act_type,
                 IR_node.name)
 
@@ -460,19 +487,19 @@ def predict(model, labels, url):
     def emit_BatchNorm(self, IR_node):
         if self.weight_loaded:
             weight_dict = self.weights[IR_node.name]
-        
+
         # axis = IR_node.IR_layer.attr["axis"].i
         axis = 1
         eps = IR_node.IR_layer.attr["epsilon"].f
         momentum = IR_node.IR_layer.attr["momentum"].f
 
         fix_gamma = not IR_node.IR_layer.attr["scale"].b
-        
+
         if self.weight_loaded:
             if not fix_gamma:
                 self.output_weights[IR_node.name + "_gamma"] = weight_dict['scale']
             self.output_weights[IR_node.name + "_beta"] = weight_dict['bias']
-        
+
         # not supported yet
         use_global_stats = "False"
         if self.weight_loaded:
@@ -481,7 +508,7 @@ def predict(model, labels, url):
 
         code = "{:<15} = mx.sym.BatchNorm(data = {}, axis = {}, eps = {}, momentum = {}, fix_gamma = {}, use_global_stats = {}, name = '{}')".format(
                 IR_node.variable_name,
-                self.parent_variable_name(IR_node),                
+                self.parent_variable_name(IR_node),
                 axis,
                 eps,
                 momentum,
@@ -500,10 +527,10 @@ def predict(model, labels, url):
         if global_pool:
             kernel = [1] * (len(IR_node.IR_layer.attr["strides"].list.i) - 2)
         else:
-            for e in IR_node.IR_layer.attr["window_shape"].list.i[1:-1]:
+            for e in IR_node.IR_layer.attr["kernel_shape"].list.i[1:-1]:
                 kernel.append(e)
 
-        pool_type = IR_node.IR_layer.attr["pooling_type"].s.lower().decode()
+        pool_type = IR_node.get_attr('pooling_type').lower()
 
         stride = list()
         for e in IR_node.IR_layer.attr["strides"].list.i[1:-1]:
@@ -511,45 +538,36 @@ def predict(model, labels, url):
 
         defuse_pad = False
         pad = list()
-        if "padding" in IR_node.IR_layer.attr:
+        if "pads" in IR_node.IR_layer.attr:
             output_shape = list()
             for e in IR_node.IR_layer.attr["_output_shapes"].list.shape[0].dim:
                 output_shape.append(e.size)
-        
+
             # print("Warning: MXNet Pooling Layer pad does not match IR Pooling Layer pad")
-            defuse_pad, pad = MXNetEmitter.transfer_pad(IR_node.IR_layer.attr["padding"].s, output_shape, kernel, stride)
-        pad = ', '.join('%s' % i for i in pad)
-
-        kernel = ', '.join('%s' % i for i in kernel)
-        stride = ', '.join('%s' % i for i in stride)
-
+            defuse_pad, pad = MXNetEmitter.transfer_pad(IR_node.IR_layer.attr["pads"].list.i)
         code = ""
         if not defuse_pad:
-            # code = "{:<15} = mx.sym.transpose(data = {}, axes = (0, 3, 1, 2))\n".format(IR_node.replace_scope(IR_node.name) + "_input", IR_node.replace_scope(IR_node.in_edges[0]))
-            code += "{:<15} = mx.sym.Pooling(data = {}, global_pool = {}, kernel = ({}), pool_type = '{}', stride = ({}), pad = ({}), name = '{}')".format(
-                    IR_node.variable_name,                    
+            code += "{:<15} = mx.sym.Pooling(data = {}, global_pool = {}, kernel={}, pool_type = '{}', stride={}, pad={}, name = '{}')".format(
+                    IR_node.variable_name,
                     self.parent_variable_name(IR_node),
                     global_pool,
-                    kernel,
+                    tuple(kernel),
                     pool_type,
-                    stride,
-                    pad,
+                    tuple(stride),
+                    tuple(pad),
                     IR_node.name)
-            # code += "    {:<15} = mx.sym.transpose(data = {}, axes = (0, 2, 3, 1))\n".format(IR_node.replace_scope(IR_node.name), IR_node.replace_scope(IR_node.name))
         else:
-            # code = "{:<15} = mx.sym.transpose(data = {}, axes = (0, 3, 1, 2))\n".format(IR_node.replace_scope(IR_node.name) + "_input", IR_node.replace_scope(IR_node.in_edges[0]))
-            code += self.set_pad(IR_node, code, pad)
-            code += "\n    {:<15} = mx.sym.Pooling(data = {}, global_pool = {}, kernel = ({}), pool_type = '{}', stride = ({}), name = '{}')". format(
+            code += self.set_pad(IR_node, code, pad, pool_type == "max")
+            code += "\n    {:<15} = mx.sym.Pooling(data = {}, global_pool = {}, kernel={}, pool_type = '{}', stride={}, name = '{}')".format(
                     IR_node.variable_name,
                     IR_node.variable_name + "_pad",
                     global_pool,
-                    kernel,
+                    tuple(kernel),
                     pool_type,
-                    stride,
+                    tuple(stride),
                     IR_node.name)
-            # code += "    {:<15} = mx.sym.transpose(data = {}, axes = (0, 2, 3, 1))\n".format(IR_node.replace_scope(IR_node.name), IR_node.replace_scope(IR_node.name))
 
-        return code        
+        return code
 
 
     def emit_SoftmaxOutput(self, IR_node):
@@ -585,83 +603,81 @@ def predict(model, labels, url):
         return self.emit_Flatten(IR_node)
 
 
-    def emit_Deconvolution(self, IR_node):
-        if self.weight_loaded:
-            weight_dict = self.weights[IR_node.name]
-            weights = weight_dict['weights']
-        
-        dim = len(IR_node.IR_layer.attr["filter"].list.i) - 2
+    # def emit_ConvTranspose(self, IR_node):
+    #     if self.weight_loaded:
+    #         weight_dict = self.weights[IR_node.name]
+    #         weights = weight_dict['weights']
 
-        kernel = list()
-        for idx in range(0, dim):
-            kernel.append(IR_node.IR_layer.attr["filter"].list.i[idx])
+    #     dim = len(IR_node.IR_layer.attr["kernel_shape"].list.i) - 2
 
-        stride = list()
-        for e in IR_node.IR_layer.attr["strides"].list.i[1:-1]:
-            stride.append(e)
+    #     kernel = list()
+    #     for idx in range(0, dim):
+    #         kernel.append(IR_node.IR_layer.attr["kernel_shape"].list.i[idx])
 
-        dilate = list()
-        for e in IR_node.IR_layer.attr["dilation_rate"].list.i[1:-1]:
-            dilate.append(e)
-        dilate = ', '.join('%s' % i for i in dilate)
+    #     stride = list()
+    #     for e in IR_node.IR_layer.attr["strides"].list.i[1:-1]:
+    #         stride.append(e)
 
-        defuse_pad = False
-        pad = list()
-        if "padding" in IR_node.IR_layer.attr:
-            output_shape = list()
-            for e in IR_node.IR_layer.attr["_output_shapes"].list.shape[0].dim:
-                output_shape.append(e.size)
-        
-            # print("Warning: MXNet Deconvolution Layer pad does not match IR Deconvolution Layer pad")
-            defuse_pad, pad = MXNetEmitter.transfer_pad(IR_node.IR_layer.attr["padding"].s, output_shape, kernel, stride)
-        pad = ', '.join('%s' % i for i in pad)
+    #     dilate = list()
+    #     for e in IR_node.IR_layer.attr["dilations"].list.i[1:-1]:
+    #         dilate.append(e)
+    #     dilate = ', '.join('%s' % i for i in dilate)
 
-        kernel = ', '.join('%s' % i for i in kernel)
-        stride = ', '.join('%s' % i for i in stride)
+    #     defuse_pad = False
+    #     pad = list()
+    #     if "pads" in IR_node.IR_layer.attr:
+    #         output_shape = list()
+    #         for e in IR_node.IR_layer.attr["_output_shapes"].list.shape[0].dim:
+    #             output_shape.append(e.size)
 
-        num_filter = IR_node.IR_layer.attr["filter"].list.i[-2]
-        no_bias = not IR_node.IR_layer.attr["use_bias"].b
-        if not no_bias and self.weight_loaded:
-            self.output_weights[IR_node.replace_scope(IR_node.name) + "_bias"] = weight_dict['bias']
-        
-        layout = IR_node.IR_layer.attr["data_format"].s
-        # if layout == '':
-        #     if dim == 1:
-        #         layout = 'NCW'
-        #     elif dim == 2:
-        #         layout = 'NHWC'
-        #     elif dim == 3:
-        #         layout = 'NDHWC'
-        layout = 'NCHW'
+    #         # print("Warning: MXNet Deconvolution Layer pad does not match IR Deconvolution Layer pad")
+    #         defuse_pad, pad = MXNetEmitter.transfer_pad(IR_node.IR_layer.attr["pads"].list.i)
+    #     pad = ', '.join('%s' % i for i in pad)
 
-        if self.weight_loaded:
-            # if layout not in MXNetEmitter.channels_last:
-            weights = MXNetEmitter.transpose(weights, dim)
-            self.output_weights[IR_node.replace_scope(IR_node.name) + "_weight"] = weights
+    #     kernel = ', '.join('%s' % i for i in kernel)
+    #     stride = ', '.join('%s' % i for i in stride)
 
-        code = ""
-        if not defuse_pad:
-            code = "{:<15} = mx.sym.Deconvolution(data = {}, kernel = ({}), stride = ({}), dilate = ({}), pad = ({}), num_filter = {}, no_bias = {}, layout = '{}', name = '{}')".format(
-                    IR_node.replace_scope(IR_node.name),
-                    IR_node.replace_scope(IR_node.in_edges[0]),
-                    kernel,
-                    stride,
-                    dilate,
-                    pad,
-                    num_filter,
-                    no_bias,
-                    layout,
-                    IR_node.replace_scope(IR_node.name))
-        else:
-            code = self.set_pad(IR_node, code, pad)
-            code += "\n    {:<15} = mx.sym.Deconvolution(data = {}, kernel = ({}), stride = ({}), dilate = ({}), num_filter = {}, no_bias = {}, layout = '{}', name = '{}')".format(
-                    IR_node.replace_scope(IR_node.name), IR_node.replace_scope(IR_node.name) + "_pad", kernel, stride, dilate, num_filter, no_bias, layout, IR_node.replace_scope(IR_node.name))
+    #     num_filter = IR_node.IR_layer.attr["kernel_shape"].list.i[-2]
+    #     no_bias = not IR_node.IR_layer.attr["use_bias"].b
+    #     if not no_bias and self.weight_loaded:
+    #         self.output_weights[IR_node.replace_scope(IR_node.name) + "_bias"] = weight_dict['bias']
 
-        return code        
+    #     # layout = IR_node.IR_layer.attr["data_format"].s
+    #     if dim == 1:
+    #         layout = 'NCW'
+    #     elif dim == 2:
+    #         layout = 'NCHW'
+    #     elif dim == 3:
+    #         layout = 'NCDHW'
+
+    #     if self.weight_loaded:
+    #         # if layout not in MXNetEmitter.channels_last:
+    #         weights = MXNetEmitter.transpose(weights, dim)
+    #         self.output_weights[IR_node.replace_scope(IR_node.name) + "_weight"] = weights
+
+    #     code = ""
+    #     if not defuse_pad:
+    #         code = "{:<15} = mx.sym.Deconvolution(data = {}, kernel = ({}), stride = ({}), dilate = ({}), pad = ({}), num_filter = {}, no_bias = {}, layout = '{}', name = '{}')".format(
+    #                 IR_node.replace_scope(IR_node.name),
+    #                 IR_node.replace_scope(IR_node.in_edges[0]),
+    #                 kernel,
+    #                 stride,
+    #                 dilate,
+    #                 pad,
+    #                 num_filter,
+    #                 no_bias,
+    #                 layout,
+    #                 IR_node.replace_scope(IR_node.name))
+    #     else:
+    #         code = self.set_pad(IR_node, code, pad)
+    #         code += "\n    {:<15} = mx.sym.Deconvolution(data = {}, kernel = ({}), stride = ({}), dilate = ({}), num_filter = {}, no_bias = {}, layout = '{}', name = '{}')".format(
+    #                 IR_node.replace_scope(IR_node.name), IR_node.replace_scope(IR_node.name) + "_pad", kernel, stride, dilate, num_filter, no_bias, layout, IR_node.replace_scope(IR_node.name))
+
+    #     return code
 
 
     def emit_Embedding(self, IR_node):
-        
+
         input_dim = IR_node.IR_layer.attr["input_dim"].i
         output_dim = IR_node.IR_layer.attr["output_dim"].i
         dtype = MXNetEmitter.dtype_map.get(IR_node.layer.attr["dtype"].type, "float32")
@@ -674,11 +690,11 @@ def predict(model, labels, url):
                 dtype,
                 IR_node.name)
 
-        return code        
+        return code
 
 
     # def emit_LeakyReLU(self, IR_node):
-        
+
     #     # IR only support Elu, the same problem with func emit_Activation
 
     #     code = "{:<15} = mx.sym.LeakyReLU(data = {}, )".format()
@@ -705,7 +721,7 @@ def predict(model, labels, url):
 
         shape = list()
         for e in IR_node.IR_layer.attr["shape"].list.i:
-            shape.append(e)        
+            shape.append(e)
         shape = ', '.join('%s' % i for i in shape)
         reverse = False
 
@@ -720,27 +736,17 @@ def predict(model, labels, url):
 
 
     def emit_Flatten(self, IR_node):
-
-        # if "data_format" in IR_node.IR_layer.attr:
-        #     data_format = IR_node.IR_layer.attr["data_format"].s
-        # else:
-        #     data_format = "NHWC"
-        #     print("set the conv format before flatten as default value NHWC")
-
-        # if data_format in MXNetEmitter.channels_last:
-        code = "{:<15} = mx.sym.transpose(data = {}, axes = (0, 2, 3, 1))\n".format("trans", self.parent_variable_name(IR_node))
-        code += "    {:<15} = mx.sym.flatten(data = {}, name = '{}')".format(IR_node.variable_name, "trans", IR_node.name)
-        # else:
-        #     code += "{:<15} = mx.sym.flatten(data = {}, name = '{}')".format(
-        #             IR_node.replace_scope(IR_node.name),
-        #             IR_node.replace_scope(IR_node.in_edges[0]),
-        #             IR_node.replace_scope(IR_node.name))
+        # code = "{:<15} = mx.sym.transpose(data = {}, axes = (0, 2, 3, 1))\n".format("trans", self.parent_variable_name(IR_node))
+        code = "{:<15} = mx.sym.flatten(data = {}, name = '{}')".format(
+                IR_node.variable_name,
+                self.parent_variable_name(IR_node),
+                IR_node.name)
 
         return code
 
 
     @staticmethod
-    def _convert_axis(IR_node, axis):        
+    def _convert_axis(IR_node, axis):
         ndim = len(IR_node.layer.attr['_output_shapes'].list.shape[0].dim)
         if axis == 0:
             return 0
@@ -749,7 +755,7 @@ def predict(model, labels, url):
         else:
             return axis + 1
 
-    
+
     def emit_Concat(self, IR_node):
         dim = MXNetEmitter._convert_axis(IR_node, IR_node.IR_layer.attr["axis"].i)
         code = "{:<15} = mx.sym.concat({}, dim = {}, name = '{}')".format(
@@ -767,7 +773,7 @@ def predict(model, labels, url):
 
         code = "{:<15} = mx.sym.cast(data = {}, dtype = {}, name = '{}')".format(
                 IR_node.variable_name,
-                self.parent_variable_name(IR_node),                
+                self.parent_variable_name(IR_node),
                 dtype,
                 IR_node.name)
 
@@ -775,7 +781,7 @@ def predict(model, labels, url):
 
 
     def emit_Expand_dims(self, IR_node):
-        
+
         axis = IR_node.IR_layer.attr["axis"].i
 
         code = "{:<15} = mx.sym.expand_dims(data = {}, axis = {}, name = '{}')".format(
@@ -790,12 +796,10 @@ def predict(model, labels, url):
     def emit_Pad(self, IR_node):
         mode = IR_node.IR_layer.attr["mode"].s.lower().decode()
         pad_width = list()
-        pad_width.extend([0, 0, 0, 0])
-        for e in IR_node.IR_layer.attr["paddings"].list.i[2:-2]:
-            pad_width.append(e)
-
-        # if not pad_width[2] == 0 or not pad_width[3] == 0:
-        #     print("Warning: please check padding layer manually")
+        pad_width.extend([0]*4)
+        padding = convert_onnx_pad_to_tf(IR_node.get_attr("pads"))[1:-1]
+        for padding_pair in padding:
+            pad_width.extend(padding_pair)
 
         pad_width = ', '.join('%s' % i for i in pad_width)
 
@@ -831,7 +835,7 @@ def predict(model, labels, url):
     def emit_ReduceMean(self, IR_node):
         axes = IR_node.layer.attr['axes'].list.i[:]
         axes = ','.join('%s' % MXNetEmitter.transpose_map[i] for i in axes)
-        
+
         code = "{:<15} = mx.sym.mean(data = {}, axis = ({}), keepdims = {})".format(
                 IR_node.variable_name,
                 self.parent_variable_name(IR_node),
@@ -840,11 +844,11 @@ def predict(model, labels, url):
 
         return code
 
- 
+
     def emit_LRN(self, IR_node):
         code = "{:<15} = mx.sym.LRN(data = {}, alpha = {}, beta = {}, knorm = {}, nsize = {}, name = '{}')".format(
                 IR_node.variable_name,
-                self.parent_variable_name(IR_node),                
+                self.parent_variable_name(IR_node),
                 IR_node.layer.attr['alpha'].f,
                 IR_node.layer.attr['beta'].f,
                 IR_node.layer.attr['k'].f,

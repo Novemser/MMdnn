@@ -5,37 +5,40 @@
 
 from __future__ import division
 import os
-import math
 import sys
-import requests
 import numpy as np
+from six import text_type, binary_type, integer_types
+import mmdnn.conversion.common.IR.graph_pb2 as graph_pb2
 
-__all__ = ["assign_IRnode_values", "convert_onnx_pad_to_tf", 'convert_tf_pad_to_onnx', 'compute_tf_same_padding', 'is_valid_padding', 'download_file']
+
+__all__ = ["assign_IRnode_values", "convert_onnx_pad_to_tf", 'convert_tf_pad_to_onnx',
+           'compute_tf_same_padding', 'is_valid_padding', 'download_file',
+           'shape_to_list', 'list_to_shape']
+
 
 def assign_attr_value(attr, val):
     from mmdnn.conversion.common.IR.graph_pb2 import TensorShape
     '''Assign value to AttrValue proto according to data type.'''
     if isinstance(val, bool):
         attr.b = val
-    elif isinstance(val, int):
+    elif isinstance(val, integer_types):
         attr.i = val
     elif isinstance(val, float):
         attr.f = val
-    elif isinstance(val, str):
-        attr.s = val.encode('utf-8')
-    elif isinstance(val, bytes):
+    elif isinstance(val, binary_type) or isinstance(val, text_type):
+        if hasattr(val, 'encode'):
+            val = val.encode()
         attr.s = val
     elif isinstance(val, TensorShape):
         attr.shape.MergeFromString(val.SerializeToString())
     elif isinstance(val, list):
-        if not val:
-            return
-        if isinstance(val[0], int):
+        if not val: return
+        if isinstance(val[0], integer_types):
             attr.list.i.extend(val)
         elif isinstance(val[0], TensorShape):
             attr.list.shape.extend(val)
         else:
-            raise NotImplementedError('AttrValue cannot be of %s %s' % (type(val), type(val[0])))
+            raise NotImplementedError('AttrValue cannot be of list[{}].'.format(val[0]))
     else:
         raise NotImplementedError('AttrValue cannot be of %s' % type(val))
 
@@ -64,6 +67,18 @@ def convert_onnx_pad_to_tf(pads):
 
 def is_valid_padding(pads):
     return sum(np.reshape(pads, -1)) == 0
+
+
+def shape_to_list(shape):
+    return [dim.size for dim in shape.dim]
+
+
+def list_to_shape(shape):
+    ret = graph_pb2.TensorShape()
+    for dim in shape:
+        new_dim = ret.dim.add()
+        new_dim.size = dim
+    return ret
 
 
 def compute_tf_same_padding(input_shape, kernel_shape, strides, data_format='NHWC'):
@@ -118,14 +133,13 @@ def _progress_check(count, block_size, total_size):
 def _single_thread_download(url, file_name):
     from six.moves import urllib
     result, _ = urllib.request.urlretrieve(url, file_name, _progress_check)
-    print ("")
     return result
 
 
 def _downloader(start, end, url, filename):
+    import requests
     headers = {'Range': 'bytes=%d-%d' % (start, end)}
     r = requests.get(url, headers=headers, stream=True)
-
     with open(filename, "r+b") as fp:
         fp.seek(start)
         var = fp.tell()
@@ -159,7 +173,7 @@ def _multi_thread_download(url, file_name, file_size, thread_count):
     return file_name
 
 
-def download_file(url, directory='./', local_fname=None, force_write=False):
+def download_file(url, directory='./', local_fname=None, force_write=False, auto_unzip=False):
     """Download the data from source url, unless it's already here.
 
     Args:
@@ -174,21 +188,43 @@ def download_file(url, directory='./', local_fname=None, force_write=False):
     if not os.path.isdir(directory):
         os.mkdir(directory)
 
-    if local_fname is None:
-        local_fname = url.split('/')[-1]
+    if not local_fname:
+        k = url.rfind('/')
+        local_fname = url[k + 1:]
+
     local_fname = os.path.join(directory, local_fname)
 
     if os.path.exists(local_fname) and not force_write:
         print ("File [{}] existed!".format(local_fname))
         return local_fname
 
-    print ("Downloading file [{}] from [{}]".format(local_fname, url))
+    else:
+        print ("Downloading file [{}] from [{}]".format(local_fname, url))
+        try:
+            import wget
+            ret = wget.download(url, local_fname)
+        except:
+            ret = _single_thread_download(url, local_fname)
 
-    try:
-        import wget
-        return wget.download(url, local_fname)
-    except:
-        return _single_thread_download(url, local_fname)
+    if auto_unzip:
+        if ret.endswith(".tar.gz") or ret.endswith(".tgz"):
+            try:
+                import tarfile
+                tar = tarfile.open(ret)
+                tar.extractall(directory)
+                tar.close()
+            except:
+                print("Unzip file [{}] failed.".format(ret))
+
+        elif ret.endswith('.zip'):
+            try:
+                import zipfile
+                zip_ref = zipfile.ZipFile(ret, 'r')
+                zip_ref.extractall(directory)
+                zip_ref.close()
+            except:
+                print("Unzip file [{}] failed.".format(ret))
+    return ret
 """
     r = requests.head(url)
     try:

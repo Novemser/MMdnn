@@ -4,6 +4,7 @@
 #----------------------------------------------------------------------------------------------
 
 import os
+from six.moves import xrange
 
 from mmdnn.conversion.common.IR.IR_graph import IRGraph, IRGraphNode
 import mmdnn.conversion.common.IR.graph_pb2 as graph_pb2
@@ -45,18 +46,19 @@ class Keras2Emitter(Emitter):
 from keras.models import Model
 from keras import layers
 import keras.backend as K
+import numpy as np
 
-def load_weights(model, weight_file):
-    import numpy as np
 
-    if weight_file == None:
-        return
-
+def load_weights_from_file(weight_file):
     try:
         weights_dict = np.load(weight_file).item()
     except:
         weights_dict = np.load(weight_file, encoding='bytes').item()
 
+    return weights_dict
+
+
+def set_layer_weights(model, weights_dict):
     for layer in model.layers:
         if layer.name in weights_dict:
             cur_dict = weights_dict[layer.name]
@@ -80,7 +82,9 @@ def load_weights(model, weight_file):
 
     return model
 
+
 def KitModel(weight_file = None):
+    weights_dict = load_weights_from_file(weight_file) if not weight_file == None else None
         """
 
 
@@ -101,7 +105,7 @@ def KitModel(weight_file = None):
             "model",
             ', '.join([self.IR_graph.get_node(i).real_variable_name for i in self.IR_graph.input_layers]),
             ', '.join([self.IR_graph.get_node(i).real_variable_name for i in self.IR_graph.output_layers])))
-        self.add_body(1, ["load_weights(model, weight_file)", "return model"])
+        self.add_body(1, ["set_layer_weights(model, weights_dict)", "return model"])
 
         for i in self.used_layers:
             func = getattr(self, "_layer_" + i)
@@ -172,26 +176,45 @@ def KitModel(weight_file = None):
 
 
     def _emit_convolution(self, IR_node, conv_type):
-        assert IR_node.get_attr('group', 1) == 1
-        filters = IR_node.get_attr('kernel_shape')[-1]
-        filters_str = 'filters = {}'.format(filters) if conv_type.startswith('layer') else 'depth_multiplier = {}'.format(filters)
+        self.used_layers.add('Conv')
+        # assert IR_node.get_attr('group', 1) == 1
+        group = IR_node.get_attr("group", 1)
+
+        if conv_type.endswith('Transpose'):
+            filters = IR_node.get_attr('kernel_shape')[-2]
+        else:
+            filters = IR_node.get_attr('kernel_shape')[-1]
+
+        filters_str = 'filters={}'.format(filters) if conv_type.startswith('layer') else 'depth_multiplier={}'.format(filters)
 
         input_node, padding = self._defuse_padding(IR_node)
-        self.add_body(1, "{:<15} = {}(name='{}', {}, kernel_size=({}), strides=({}), padding='{}', use_bias={})({})".format(
+
+        dilations = IR_node.get_attr('dilations')
+        if not dilations:
+            dilations = [1] * len(IR_node.get_attr('kernel_shape'))
+
+        self.add_body(1, "{:<15} = convolution(weights_dict, name='{}', input={}, group={}, conv_type='{}', {}, kernel_size={}, strides={}, dilation_rate={}, padding='{}', use_bias={})".format(
             IR_node.variable_name,
-            conv_type,
             IR_node.name,
+            input_node,
+            group,
+            conv_type,
             filters_str,
             tuple(IR_node.get_attr('kernel_shape')[:-2]),
             tuple(IR_node.get_attr('strides')[1:-1]),
+            tuple(dilations[1:-1]),
             padding,
-            IR_node.get_attr('use_bias'),
-            input_node))
+            IR_node.get_attr('use_bias')))
+
+
+    def emit_ConvTranspose(self, IR_node):
+        dim = len(IR_node.get_attr('kernel_shape')) - 2
+        self._emit_convolution(IR_node, 'layers.Conv{}DTranspose'.format(dim))
 
 
     def emit_Conv(self, IR_node):
         dim = len(IR_node.get_attr('kernel_shape')) - 2
-        return self._emit_convolution(IR_node, 'layers.Conv{}D'.format(dim))
+        self._emit_convolution(IR_node, 'layers.Conv{}D'.format(dim))
 
 
     #############
@@ -233,8 +256,8 @@ def KitModel(weight_file = None):
         self.add_body(1, "{:<15} = layers.Dense(name = '{}', units = {}, use_bias = {})({})".format(
             IR_node.variable_name,
             IR_node.name,
-            IR_node.layer.attr["units"].i,
-            IR_node.layer.attr["use_bias"].b,
+            IR_node.get_attr('units'),
+            IR_node.get_attr('use_bias'),
             self.parent_variable_name(IR_node)))
 
 
@@ -316,8 +339,8 @@ def KitModel(weight_file = None):
         self.add_body(1, "{:<15} = layers.Embedding(input_dim = {}, output_dim = {}, mask_zero = {})({})".format(
             IR_node.variable_name,
             IR_node.get_attr('input_dim'),
-            IR_node.IR_layer.attr['output_dim'].i,
-            IR_node.IR_layer.attr['mask_zero'].b,
+            IR_node.get_attr('output_dim'),
+            IR_node.get_attr('mask_zero'),
             IR_node.in_edges[0]))
 
 
@@ -423,7 +446,21 @@ def KitModel(weight_file = None):
 
 
     def emit_DepthwiseConv(self, IR_node):
-        return self._emit_convolution(IR_node, 'keras.applications.mobilenet.DepthwiseConv2D')
+        self._emit_convolution(IR_node, 'keras.applications.mobilenet.DepthwiseConv2D')
+
+    def emit_Crop(self, IR_node):
+        border = IR_node.get_attr('border')
+        rank = len(border) // 2
+        cropping = []
+        for idx in xrange(rank):
+            cropping.append(tuple([border[idx * 2], border[idx * 2 + 1]]))
+
+        self.add_body(1, "{:<15} = layers.Cropping{}D(cropping={}, name='{}')({})".format(
+            IR_node.variable_name,
+            rank,
+            tuple(cropping),
+            IR_node.name,
+            self.parent_variable_name(IR_node)))
 
 
     def _layer_Flatten(self):
@@ -474,3 +511,39 @@ class LRN(Layer):
 
     def compute_output_shape(self, input_shape):
         return input_shape''')
+
+
+    def _layer_Conv(self):
+        self.add_body(0, """
+def convolution(weights_dict, name, input, group, conv_type, filters=None, **kwargs):
+    if not conv_type.startswith('layer'):
+        layer = keras.applications.mobilenet.DepthwiseConv2D(name=name, **kwargs)(input)
+        return layer
+
+    grouped_channels = int(filters / group)
+    group_list = []
+
+    if group == 1:
+        func = getattr(layers, conv_type.split('.')[-1])
+        layer = func(name = name, filters = filters, **kwargs)(input)
+        return layer
+
+    weight_groups = list()
+    if not weights_dict == None:
+        w = np.array(weights_dict[name]['weights'])
+        weight_groups = np.split(w, indices_or_sections=group, axis=-1)
+
+    for c in range(group):
+        x = layers.Lambda(lambda z: z[:, :, :, c * grouped_channels:(c + 1) * grouped_channels])(input)
+        x = layers.Conv2D(name=name + "_" + str(c), filters=grouped_channels, **kwargs)(x)
+        weights_dict[name + "_" + str(c)] = dict()
+        weights_dict[name + "_" + str(c)]['weights'] = weight_groups[c]
+
+        group_list.append(x)
+
+    layer = layers.concatenate(group_list, axis = -1)
+
+    if 'bias' in weights_dict[name]:
+        b = K.variable(weights_dict[name]['bias'], name = name + "_bias")
+        layer = layer + b
+    return layer""")

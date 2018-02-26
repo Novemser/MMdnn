@@ -18,40 +18,16 @@ def _convert(args):
         with open(args.dstPath + ".pb", 'wb') as of:
             of.write(prototxt)
         print ("IR network structure is saved as [{}.pb].".format(args.dstPath))
-
+        
         import numpy as np
         with open(args.dstPath + ".npy", 'wb') as of:
             np.save(of, data)
         print ("IR weights are saved as [{}.npy].".format(args.dstPath))
-
+        
         return 0
 
     elif args.srcFramework == 'caffe2':
         raise NotImplementedError("Caffe2 is not supported yet.")
-        '''
-        assert args.inputShape != None
-        from dlconv.caffe2.conversion.transformer import Caffe2Transformer
-        transformer = Caffe2Transformer(args.network, args.weights, args.inputShape, 'tensorflow')
-
-        graph = transformer.transform_graph()
-        data = transformer.transform_data()
-
-        from dlconv.common.writer import JsonFormatter, ModelSaver, PyWriter
-        JsonFormatter(graph).dump(args.dstPath + ".json")
-        print ("IR saved as [{}.json].".format(args.dstPath))
-
-        prototxt = graph.as_graph_def().SerializeToString()
-        with open(args.dstPath + ".pb", 'wb') as of:
-            of.write(prototxt)
-        print ("IR saved as [{}.pb].".format(args.dstPath))
-
-        import numpy as np
-        with open(args.dstPath + ".npy", 'wb') as of:
-            np.save(of, data)
-        print ("IR weights saved as [{}.npy].".format(args.dstPath))
-
-        return 0
-        '''
 
     elif args.srcFramework == 'keras':
         if args.network != None:
@@ -62,15 +38,14 @@ def _convert(args):
         from mmdnn.conversion.keras.keras2_parser import Keras2Parser
         parser = Keras2Parser(model)
 
-    elif args.srcFramework == 'tensorflow':
-        if args.weights == None:
-            # only convert network structure
-            model = args.network
-        else:
-            model = (args.network, args.weights)
+    elif args.srcFramework == 'tensorflow' or args.srcFramework == 'tf':
+        if args.dstNodeName is None:
+            raise ValueError("Need to provide the output node of Tensorflow model.")
+
+        assert args.network or args.frozen_pb
 
         from mmdnn.conversion.tensorflow.tensorflow_parser import TensorflowParser
-        parser = TensorflowParser(model, args.dstNodeName)
+        parser = TensorflowParser(args.network, args.weights, args.frozen_pb, args.dstNodeName)
 
     elif args.srcFramework == 'mxnet':
         assert args.inputShape != None
@@ -86,18 +61,15 @@ def _convert(args):
         from mmdnn.conversion.mxnet.mxnet_parser import MXNetParser
         parser = MXNetParser(model)
 
-    elif args.srcFramework == 'pytorch':
-        assert args.inputShape != None
-        from mmdnn.conversion.pytorch.pytorch_parser import PyTorchParser
-        parser = PyTorchParser(args.network, args.inputShape)
+    elif args.srcFramework == 'cntk':
+        from mmdnn.conversion.cntk.cntk_parser import CntkParser
+        model = args.network or args.weights
+        parser = CntkParser(model)
 
     else:
-        raise NotImplementedError("Unknown framework [{}].".format(args.srcFramework))
+        raise ValueError("Unknown framework [{}].".format(args.srcFramework))
 
-    parser.gen_IR()
-    parser.save_to_json(args.dstPath + ".json")
-    parser.save_to_proto(args.dstPath + ".pb")
-    parser.save_weights(args.dstPath + ".npy")
+    parser.run(args.dstPath)
 
     return 0
 
@@ -106,11 +78,11 @@ def _main():
     import argparse
 
     parser = argparse.ArgumentParser(description = 'Convert other model file formats to IR format.')
-
+    
     parser.add_argument(
         '--srcFramework', '-f',
         type=_text_type,
-        choices=["caffe", "caffe2", "cntk", "mxnet", "keras", "tensorflow", 'pytorch'],
+        choices=["caffe", "caffe2", "cntk", "mxnet", "keras", "tensorflow", 'tf', 'pytorch'],
         help="Source toolkit name of the model to be converted.")
 
     parser.add_argument(
@@ -136,6 +108,13 @@ def _main():
         type=_text_type,
         default=None,
         help="[Tensorflow] Output nodes' name of the graph.")
+
+    parser.add_argument(
+        '--frozen_pb',
+        type=_text_type,
+        default=None,
+        help="[Tensorflow] frozen model file.")
+
 
     parser.add_argument(
         '--inputShape',

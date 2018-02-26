@@ -139,7 +139,7 @@ class TensorflowParser(Parser):
 
         # moving variance (var)
         moving_variance = self.get_parent(source_node.name, [0, 0])
-        if self.weight_loaded:
+        if self.weight_loaded and moving_variance.name in self.ckpt_data.keys():
             self.set_weight(source_node.name, 'var', self.ckpt_data[moving_variance.name])
 
         # gamma (scale)
@@ -156,7 +156,7 @@ class TensorflowParser(Parser):
 
         # mean
         mean = self.get_parent(output_node.name, [1, 1, 0, 0], True)
-        if self.weight_loaded:
+        if self.weight_loaded and mean.name in self.ckpt_data.keys():
             self.set_weight(source_node.name, 'mean', self.ckpt_data[mean.name])
 
         # bias
@@ -177,16 +177,15 @@ class TensorflowParser(Parser):
         output_node.real_name = source_node.name
 
 
-    def __init__(self, input_args, dest_nodes = None):
+    def __init__(self, meta_file, checkpoint_file, frozen_file, dest_nodes = None):
         super(TensorflowParser, self).__init__()
 
-        # load model files into Keras graph
-        from six import string_types as _string_types
-        if isinstance(input_args, _string_types):
-            model = TensorflowParser._load_meta(input_args)
-        elif isinstance(input_args, tuple):
-            model = TensorflowParser._load_meta(input_args[0])
-            self.ckpt_data = TensorflowParser._load_weights(input_args[1])
+        # load model files into TensorFlow graph
+        if meta_file:
+            model = TensorflowParser._load_meta(meta_file)
+
+        if checkpoint_file:
+            self.ckpt_data = TensorflowParser._load_weights(checkpoint_file)
             self.weight_loaded = True
 
         if dest_nodes != None:
@@ -194,7 +193,7 @@ class TensorflowParser(Parser):
             model = extract_sub_graph(model, dest_nodes.split(','))
 
         # Build network graph
-        self.tf_graph =  TensorflowGraph(model)
+        self.tf_graph = TensorflowGraph(model)
         self.tf_graph.build()
 
 
@@ -435,23 +434,18 @@ class TensorflowParser(Parser):
         if self.weight_loaded:
             self.set_weight(source_node.name, 'weights', self.ckpt_data[W.name])
 
-        if source_node.out_edges:
-            add_node = self.tf_graph.get_node(source_node.out_edges[0])
-            if add_node.type == 'Add':
-                add_node.covered = True
-                add_node.real_name = source_node.real_name
-                # FullyConnected Layer
-                # name, op
-                TensorflowParser._copy_and_reop(source_node, IR_node, 'FullyConnected')
+        if source_node.out_edges and self.tf_graph.get_node(source_node.out_edges[0]).type == 'Add':
+            add_node.covered = True
+            add_node.real_name = source_node.real_name
+            # FullyConnected Layer
+            # name, op
+            TensorflowParser._copy_and_reop(source_node, IR_node, 'FullyConnected')
 
-                # get Bias
-                B = self.tf_graph.get_node(self.tf_graph.get_node(source_node.out_edges[0]).in_edges[1]).in_edges[0]
-                if self.weight_loaded:
-                    self.set_weight(source_node.name, 'bias', self.ckpt_data[B])
-                IR_node.attr['use_bias'].b = True
-
-            else:
-                raise NotImplementedError("Not implemented yet. Please submit a issue in github and provide your models for reproduce.")
+            # get Bias
+            B = self.tf_graph.get_node(self.tf_graph.get_node(source_node.out_edges[0]).in_edges[1]).in_edges[0]
+            if self.weight_loaded:
+                self.set_weight(source_node.name, 'bias', self.ckpt_data[B])
+            IR_node.attr['use_bias'].b = True
 
         else:
             # Matmul Layer
@@ -602,3 +596,16 @@ class TensorflowParser(Parser):
             self.set_weight(source_node.name, 'mean', self.ckpt_data[mean.name])
             self.set_weight(source_node.name, 'var', self.ckpt_data[var.name])
 
+
+    def rename_Transpose(self, source_node):
+        IR_node = self._convert_identity_operation(source_node, 1)
+        perm = self.get_parent(source_node.name, [1]).layer.attr['value'].tensor
+        perm = tensor_util.MakeNdarray(perm).tolist()
+        assign_IRnode_values(IR_node, {'perm' : perm})
+
+    def rename_Sigmoid(self, source_node):
+        IR_node = self._convert_identity_operation(source_node)
+
+
+    def rename_Mul(self, source_node):
+        IR_node = self._convert_identity_operation(source_node)

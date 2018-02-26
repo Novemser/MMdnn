@@ -5,8 +5,8 @@
 
 from collections import namedtuple
 import numpy as np
-import mxnet as mx
 from mmdnn.conversion.examples.imagenet_test import TestKit
+import mxnet as mx
 
 Batch = namedtuple('Batch', ['data'])
 
@@ -15,8 +15,7 @@ class TestMXNet(TestKit):
 
     def __init__(self):
         super(TestMXNet, self).__init__()
-        
-        self.truth['tensorflow']['resnet'] = [(22, 13.58994), (147, 8.9273033), (90, 5.7173896), (24, 5.709712), (88, 4.7731524)]
+
         self.truth['tensorflow']['inception_v3'] = [(22, 9.6691055), (24, 4.3524752), (25, 3.5957956), (132, 3.5657482), (23, 3.3462858)]
         self.truth['keras']['inception_v3'] = [(21, 0.93430501), (23, 0.0028834261), (131, 0.0014781745), (24, 0.0014518937), (22, 0.0014435325)]
 
@@ -62,10 +61,10 @@ class TestMXNet(TestKit):
 
         test_model.set_params(arg_params = arg_params, aux_params = aux_params, allow_missing = True, allow_extra = True)
         test_model.forward(Batch([mx.nd.array(self.data)]))
-        prob = self.model.get_outputs()[0].asnumpy()
-        super(TestMXNet, self).print_intermediate_result(prob, if_transpose)
+        prob = test_model.get_outputs()[0].asnumpy()
+        print(prob)
 
-    
+
     def dump(self, path = None):
         if path is None: path = self.args.dump
         self.model.save_checkpoint(path, 0)

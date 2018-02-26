@@ -17,11 +17,11 @@ class GraphNode(object):
 
     @property
     def variable_name(self):
-        return self.name.replace('/', '_')
+        return self.name.replace('/', '_').replace('-', '_')
 
     @property
     def real_variable_name(self):
-        return self.real_name.replace('/', '_')
+        return self.real_name.replace('/', '_').replace('-', '_')
 
 
     def get_attr(self, attr_name, default_value=None):
@@ -66,7 +66,7 @@ class Graph(object):
 
     def get_node(self, name):
         if not name in self.layer_map:
-            print ("Error: Graph doesn't have node [%s]." % name)
+            raise IOError("Graph doesn't have node [%s]." % name)
             return None
         else:
             return self.layer_map[name]
@@ -123,9 +123,10 @@ class Graph(object):
 
     def _make_connection(self, src, dst):
         if (src == dst) or (src not in self.layer_map) or (dst not in self.layer_map):
-#            print ("Warning: Graph Construct a self-loop node {}. Ignored.".format(src))
+            print ("Warning: Graph Construct a self-loop node {}. Ignored.".format(src))
             return
 
+        # print ('{} --> {}'.format(src, dst))
         if not dst in self.layer_map[src].out_edges:
             self.layer_map[src].out_edges.append(dst)
         if not src in self.layer_map[dst].in_edges:

@@ -149,7 +149,7 @@ def KitModel(weight_file = None):
                 IR_node.variable_name,
                 IR_node.name,
                 IR_node.get_attr('kernel_shape')[-1],
-                ', '.join('%s' % i for i in IR_node.layer.attr["kernel_shape"].list.i[-2]),
+                ', '.join('%s' % i for i in IR_node.layer.attr["kernel_shape"].list.i[:-2]),
                 ', '.join('%s' % i for i in IR_node.layer.attr['strides'].list.i[1:-1]),
                 IR_node.get_attr('auto_pad') != 'VALID',
                 IR_node.get_attr('use_bias'),
@@ -250,10 +250,10 @@ def KitModel(weight_file = None):
 
 
     def emit_Reshape(self, IR_node):
-        self.add_body(1, "{:<15} = cntk.reshape({}, shape=({},), name='{}')".format(
+        self.add_body(1, "{:<15} = cntk.reshape({}, shape={}, name='{}')".format(
             IR_node.variable_name,
             self.parent_variable_name(IR_node),
-            ', '.join('%s' % i for i in IR_node.get_attr('shape')),
+            tuple(IR_node.get_attr('shape')),
             IR_node.name))
 
 
@@ -299,6 +299,21 @@ def KitModel(weight_file = None):
             self.add_body(1, "{:<15} = {}".format(
                 IR_node.variable_name,
                 inputs))
+
+    def emit_Sub(self, IR_node):
+        if len(IR_node.in_edges) > 1:
+            inputs = ' -'.join(self.IR_graph.get_node(i).real_variable_name for i in IR_node.in_edges)
+            self.add_body(1, "{:<15} = {}".format(
+                IR_node.variable_name,
+                inputs))
+
+    def emit_Mul(self, IR_node):
+        if len(IR_node.in_edges) > 1:
+            inputs = ' *'.join(self.IR_graph.get_node(i).real_variable_name for i in IR_node.in_edges)
+            self.add_body(1, "{:<15} = {}".format(
+                IR_node.variable_name,
+                inputs))
+
 
 
     def emit_Concat(self, IR_node):

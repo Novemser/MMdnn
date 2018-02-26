@@ -65,7 +65,7 @@ LAYER_DESCRIPTORS = {
     'ContrastiveLoss': shape_scalar,
     'Convolution': shape_convolution,
     'Crop': shape_not_implemented,
-    'Deconvolution': shape_not_implemented,
+    'Deconvolution': shape_deconvolution,
     'Data': shape_data,
     'Dropout': shape_identity,
     'DummyData': shape_data,
@@ -91,7 +91,7 @@ LAYER_DESCRIPTORS = {
     'Scale': shape_identity,
     'Sigmoid': shape_identity,
     'SigmoidCrossEntropyLoss': shape_scalar,
-    'Silence': shape_not_implemented,
+    'Silence': shape_identity,
     'Softmax': shape_identity,
     'SoftmaxWithLoss': shape_scalar,
     'Split': shape_not_implemented,
@@ -99,13 +99,14 @@ LAYER_DESCRIPTORS = {
     'TanH': shape_identity,
     'WindowData': shape_not_implemented,
     'Threshold': shape_identity,
+    'Reshape' : shape_reshape
 }
 
 LAYER_TYPES = LAYER_DESCRIPTORS.keys()
 
 LayerType = type('LayerType', (), {t : t for t in LAYER_TYPES})
 
-KernelParameters = namedtuple('KernelParameters', ['k_h', 'k_w', 's_h', 's_w', 'p_h', 'p_w'])
+KernelParameters = namedtuple('KernelParameters', ['global_pooling', 'k_h', 'k_w', 's_h', 's_w', 'p_h', 'p_w'])
 
 class NodeKind(LayerType):
 
@@ -185,45 +186,50 @@ class CaffeNode(object):
     def kernel_parameters(self):
         assert self.kind in (NodeKind.Convolution, NodeKind.Pooling, NodeKind.Deconvolution)
         params = self.parameters
-        k_h = self.get_kernel_value(params.kernel_h, params.kernel_size, 0)
-        k_w = self.get_kernel_value(params.kernel_w, params.kernel_size, 1)
-        s_h = self.get_kernel_value(params.stride_h, params.stride, 0, default=1)
-        s_w = self.get_kernel_value(params.stride_w, params.stride, 1, default=1)
+        global_pooling = hasattr(params, 'global_pooling') and params.global_pooling
+        if not global_pooling:
+            k_h = self.get_kernel_value(params.kernel_h, params.kernel_size, 0)
+            k_w = self.get_kernel_value(params.kernel_w, params.kernel_size, 1)
+            s_h = self.get_kernel_value(params.stride_h, params.stride, 0, default=1)
+            s_w = self.get_kernel_value(params.stride_w, params.stride, 1, default=1)
+        else:
+            k_h = k_w = 0
+            s_h = s_w = 1
         p_h = self.get_kernel_value(params.pad_h, params.pad, 0, default=0)
-        p_w = self.get_kernel_value(params.pad_h, params.pad, 1, default=0)
-        return KernelParameters(k_h, k_w, s_h, s_w, p_h, p_w)
+        p_w = self.get_kernel_value(params.pad_w, params.pad, 1, default=0)
+        return KernelParameters(global_pooling, k_h, k_w, s_h, s_w, p_h, p_w)
 
     def __str__(self):
         return '[%s] %s' % (self.kind, self.name)
-    
+
     def __repr__(self):
         return '%s (0x%x)' %(self.name, id(self))
 
 
 class CaffeGraph(object):
-    
+
     def __init__(self, nodes=None, name=None):
         self.nodes = nodes or []
         self.node_lut = {node.name: node for node in self.nodes}
         self.name = name
         self.prototxt = None
-    
+
     def add_node(self, node):
         self.nodes.append(node)
         self.node_lut[node.name] = node
-    
+
     def get_node(self, name):
         try:
             return self.node_lut[name]
         except KeyError:
             raise ConversionError('Layer not found: %s' % name)
-    
+
     def get_input_nodes(self):
         return [node for node in self.nodes if len(node.parents) == 0]
 
     def get_output_nodes(self):
         return [node for node in self.nodes if len(node.children) == 0]
-    
+
     def topologically_sorted(self):
         visited = set()
         sorted_nodes = []
@@ -263,11 +269,11 @@ class CaffeGraph(object):
         else:
             for node in sorted_nodes:
                 node.output_shape = TensorShape(*NodeKind.compute_output_shape(node))
-    
+
     # consider rewrite this function to Network.py
     def replaced(self, new_nodes):
         return CaffeGraph(nodes=new_nodes, name=self.name)
-    
+
     def transformed(self, transformers):
         graph = self
         for transformer in transformers:
@@ -316,7 +322,7 @@ class GraphBuilder(object):
             text_format.Merge(f.read(), self.model)
         if self.is_train_proto:
             self.process_train_proto()
-    
+
     def process_train_proto(self):
         layers = self.model.layer or self.model.layers
         delete_layer = set()
@@ -359,7 +365,7 @@ class GraphBuilder(object):
             elif kind == NodeKind.SigmoidCrossEntropyLoss:
                 pred.type = NodeKind.Sigmoid if self.model.layer else 19
         layers.remove(last_layer)
-    
+
     def filter_layers(self, layers):
         phase_map = {0: 'train', 1: 'test'}
         filtered_layer_names = set()
@@ -376,6 +382,8 @@ class GraphBuilder(object):
             # filter them out here.
             if (not exclude) and (phase == 'test'):
                 exclude = (layer.type == LayerType.Dropout)
+            if (not exclude):
+                exclude = (layer.type == LayerType.Silence)
             if not exclude:
                 if layer.name in filtered_layer_names:
                     for i in range(1, len(filtered_layer_names)):
@@ -388,7 +396,7 @@ class GraphBuilder(object):
         return filtered_layers
 
     def make_node(self, layer):
-        kind = NodeKind.map_raw_kind(layer.type)            
+        kind = NodeKind.map_raw_kind(layer.type)
         if kind is None:
             # TODO: raise error
             pass
