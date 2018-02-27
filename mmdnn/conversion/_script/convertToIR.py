@@ -66,6 +66,11 @@ def _convert(args):
         model = args.network or args.weights
         parser = CntkParser(model)
 
+    elif args.srcFramework == 'pytorch':
+        from mmdnn.conversion.pytorch.pytorch_parser import PyTorchParser
+        model = args.network
+        parser = PyTorchParser(model, 2)
+
     else:
         raise ValueError("Unknown framework [{}].".format(args.srcFramework))
 

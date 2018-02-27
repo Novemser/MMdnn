@@ -1,16 +1,16 @@
-#----------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------
 #  Copyright (c) Microsoft Corporation. All rights reserved.
 #  Licensed under the MIT License. See License.txt in the project root for license information.
-#----------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------
 
 import os
+
 import numpy as np
-import mmdnn.conversion.common.IR.graph_pb2 as graph_pb2
-from mmdnn.conversion.common.IR.graph_pb2 import NodeDef, GraphDef, DataType
-from mmdnn.conversion.common.utils import *
-from mmdnn.conversion.common.DataStructure.parser import Parser
-from mmdnn.conversion.pytorch.pytorch_graph import PyTorchGraph
 import torch
+
+from mmdnn.conversion.common.DataStructure.parser import Parser
+from mmdnn.conversion.common.utils import *
+from mmdnn.conversion.pytorch.pytorch_graph import PyTorchGraph
 
 
 class PyTorchParser(Parser):
@@ -22,7 +22,6 @@ class PyTorchParser(Parser):
     @property
     def src_graph(self):
         return self.pytorch_graph
-
 
     ####################
     # Public Functions #
@@ -41,9 +40,8 @@ class PyTorchParser(Parser):
         self.input_shape = tuple([1] + input_shape)
         self.pytorch_graph.build(self.input_shape)
 
-
     def gen_IR(self):
-        print (self.pytorch_graph.model.childrens())
+        # print(self.pytorch_graph.model.childrens())
         for layer in self.src_graph.topological_sort:
             current_node = self.src_graph.get_node(layer)
             node_type = current_node.type
@@ -59,9 +57,9 @@ class PyTorchParser(Parser):
     # Layers #
     ##########
     def rename_UNKNOWN(self, source_node):
-        print (source_node.layer)
-        print (source_node.layer.data.size())
-        assert False
+        print(source_node.layer)
+        # print(source_node.layer.data.size())
+        # assert False
         print("PyTorch parser has not supported operator [%s] with name [%s]."
               % (source_node.type, source_node.name))
 
@@ -74,7 +72,6 @@ class PyTorchParser(Parser):
                 new_dim.size = -1
             else:
                 new_dim.size = dim
-
 
     def rename_ConvNd(self, source_node):
         kwargs = dict()
@@ -107,19 +104,15 @@ class PyTorchParser(Parser):
 
         assign_IRnode_values(IR_node, kwargs)
 
-
     def rename_Threshold(self, source_node):
         IR_node = self._convert_identity_operation(source_node, new_op='Relu')
 
-
-    def rename_MaxPool2d(self, source_node):
+    def rename_MaxPool2D(self, source_node):
         self._convert_pooling(source_node)
-
 
     def rename_View(self, source_node):
         IR_node = self._convert_identity_operation(source_node, new_op='Reshape')
-        assign_IRnode_values(IR_node, {'shape' : list(source_node.get_attr('new_sizes'))[1:]})
-
+        assign_IRnode_values(IR_node, {'shape': list(source_node.get_attr('new_sizes'))[1:]})
 
     def rename_Addmm(self, source_node):
         IR_node = self._convert_identity_operation(source_node, new_op='FullyConnected')
@@ -141,19 +134,17 @@ class PyTorchParser(Parser):
 
         print(IR_node)
 
-
     ####################
     # Helper Functions #
     ####################
 
     @staticmethod
-    def _copy_and_reop(source_node, IR_node, new_op = None):
+    def _copy_and_reop(source_node, IR_node, new_op=None):
         if new_op == None: new_op = source_node.type
         IR_node.name = source_node.name
         IR_node.op = new_op
 
-
-    def _convert_identity_operation(self, source_node, in_edge_count = None, new_op = None):
+    def _convert_identity_operation(self, source_node, in_edge_count=None, new_op=None):
         IR_node = self.IR_graph.node.add()
         PyTorchParser._copy_and_reop(source_node, IR_node, new_op)
         self.convert_inedge(source_node, IR_node, 0, in_edge_count)
