@@ -134,6 +134,12 @@ class PyTorchParser(Parser):
 
         print(IR_node)
 
+    def rename_Expand(self, source_node):
+        print("source_node:", source_node)
+
+    def rename_T(self, source_node):
+        print("T:", source_node)
+
     ####################
     # Helper Functions #
     ####################
